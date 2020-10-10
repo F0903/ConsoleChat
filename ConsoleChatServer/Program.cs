@@ -9,7 +9,7 @@ namespace ConsoleChatServer
 
         static async Task Main()
         {
-            await server.StartAsync();
+            server.Start();
             await Task.Delay(-1);
         }
     }

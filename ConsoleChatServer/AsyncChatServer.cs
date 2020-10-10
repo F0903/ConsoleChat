@@ -1,7 +1,9 @@
 ﻿using System;
 using System.Collections.Generic;
 using System.IO;
+using System.Linq;
 using System.Net;
+using System.Net.Http.Headers;
 using System.Net.Sockets;
 using System.Text;
 using System.Threading;
@@ -11,105 +13,102 @@ using Common;
 
 namespace ConsoleChatServer
 {
+    public class ClientState
+    {
+        public byte[] Buffer { get; } = new byte[1024];
+        public Socket? Socket { get; set; }
+    }
+
     public class AsyncChatServer
     {
         public const int Port = 0920;
 
-        public static readonly IPAddress IP = Common.Utility.GetLocalAddress();
+        public static readonly IPAddress ServerIp = Common.Utility.GetLocalAddress();
 
         readonly ASCIIEncoding ASCII = new ASCIIEncoding();
 
         readonly Socket server = new Socket(AddressFamily.InterNetwork, SocketType.Stream, ProtocolType.Tcp);
 
-        readonly List<Socket> clients = new List<Socket>();
-        readonly object clientLock = new object();
+        readonly Dictionary<Socket, ClientState> clients = new Dictionary<Socket, ClientState>();
 
-        public bool Listening { get; private set; } = false;
-
-        Task MessageRecieved(Socket sender, string msg)
+        void DisconnectClient(ClientState client)
         {
-            var senderName = sender.RemoteEndPoint.ToString();
-            Console.WriteLine($"[MESSAGE | {senderName}] {msg}");
-            foreach (var client in clients)
-            {
-                if (client.RemoteEndPoint == sender.RemoteEndPoint) continue;
-                var byteStr = ASCII.GetBytes($"[{senderName}] {msg}");
-                try { client.Send(byteStr, byteStr.Length, SocketFlags.None); }
-                catch { }
-            }
-            return Task.CompletedTask;
+            using var sock = client.Socket;
+            if (sock != null && sock.Connected)
+                sock.BeginDisconnect(false, x => sock.EndDisconnect(x), null);
+            clients.Remove(sock ?? clients.Single(x => x.Value == client).Key);
+            Console.WriteLine($"[DISCONNECTED] {sock?.RemoteEndPoint}");
         }
 
-        Task ManageClients()
+        void SendToAllClients(byte[] data, int count)
         {
-            lock (clientLock)
+            foreach (var client in clients.Values)
             {
-                clients.RemoveAllAndDo(x => !x.Connected, x => Console.WriteLine($"[DISCONNECTED | {x.RemoteEndPoint}]"));
-                foreach (var client in clients)
+                var sock = client.Socket;
+                if (sock == null || (sock != null && !sock.Connected))
                 {
-                    if (client.Available < 1)
-                        continue;
+                    DisconnectClient(client);
+                    continue;
+                }              
+                sock!.BeginSend(data, 0, count, 0, x => sock.EndSend(x), null);
+            }
+        }
 
-                    StringBuilder sb = new StringBuilder();
-                    byte[] buf = new byte[client.Available];
-                    client.Receive(buf);
-                    sb.Append(ASCII.GetString(buf));
+        void Accept(IAsyncResult result)
+        {
+            try
+            {
+                var sock = server.EndAccept(result);
+                Console.WriteLine($"[CONNECTED] {sock.RemoteEndPoint}");
+                server.BeginAccept(Accept, null);
+                var client = new ClientState() { Socket = sock };
+                clients.Add(sock, client);
+                sock.BeginReceive(client.Buffer, 0, client.Buffer.Length, 0, Receive, client);
+            }
+            catch (SocketException) { }
+        }
 
-                    MessageRecieved(client, sb.ToString());
+        void Receive(IAsyncResult result)
+        {
+            try
+            {
+                var state = result.AsyncState as ClientState ?? throw new Exception("ClientState passed to Receive was null.");
+                var sock = state.Socket!;
+
+                var receiveCount = sock.EndReceive(result);
+                sock.BeginReceive(state.Buffer, 0, state.Buffer.Length, 0, Receive, state);
+
+                if (receiveCount < 1)
+                {
+                    DisconnectClient(state);
                 }
+
+                Console.WriteLine($"Received {receiveCount} bytes from {state.Socket?.RemoteEndPoint}");
+
+                var ipStrBytes = ASCII.GetBytes($"[{sock.RemoteEndPoint}] ");
+                var dataCount = receiveCount + ipStrBytes.Length;
+                byte[] data = new byte[dataCount];
+                Buffer.BlockCopy(ipStrBytes, 0, data, 0, ipStrBytes.Length);
+                Buffer.BlockCopy(state.Buffer, 0, data, ipStrBytes.Length, receiveCount);
+
+                SendToAllClients(data, dataCount);
             }
-            return Task.CompletedTask;
+            catch(SocketException) { }
         }
 
-        Task Accept()
+        public void Start()
         {
-            while (Listening)
-            {
-                var client = server.Accept();
-                lock (clientLock)
-                    clients.Add(client);
-                Console.WriteLine($"[CONNECTED | {client.RemoteEndPoint}]");
-            }
-            return Task.CompletedTask;
-        }
-
-        Task Listen()
-        {
+            var localEnd = new IPEndPoint(ServerIp, Port);
+            server.Bind(localEnd);
             server.Listen(10);
-            Task.Run(Accept);
-            while (Listening)
-            {
-                ManageClients();
-            }
-            return Task.CompletedTask;
+            Console.WriteLine($"Started listening on {localEnd}");
+            server.BeginAccept(Accept, null);
         }
 
-        public Task StartAsync()
+        public void Stop()
         {
-            if (Listening)
-                return Task.CompletedTask;
-
-            Listening = true;
-            Console.WriteLine($"Started listening on {IP}:{Port}");
-            server.Bind(new IPEndPoint(IP, Port));
-
-            Task.Run(Listen);
-            Task.Run(ManageClients);
-            return Task.CompletedTask;
-        }
-
-        public Task StopAsync()
-        {
-            Listening = false;
-            foreach (var client in clients)
-            {
-                var byteStr = ASCII.GetBytes("[SERVER] Server closing");
-                client.Send(byteStr);
-                client.Close();
-            }
-            server.Shutdown(SocketShutdown.Both);
             server.Close();
-            return Task.CompletedTask;
+            clients.Clear();
         }
     }
 }

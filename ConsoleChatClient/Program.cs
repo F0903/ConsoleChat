@@ -11,50 +11,42 @@ namespace ConsoleChatClient
 {
     class Program
     {
-        static AsyncChatClient? client;
+        static readonly AsyncChatClient client = new AsyncChatClient();
 
-        const bool forceLocal = false; // SET TO FALSE FOR WAN USE
-
-        static void Throw(Exception inner) => throw inner;
-
-        static async Task Main(string[] args)
+        static void OnMessageReceived(string msg)
         {
-            client = new AsyncChatClient(forceLocal || args.Contains("-localhost"));
+            Console.WriteLine();
+        }
 
-            var clientThread = new Thread(() =>
-            {
-                try { client.StartAsync(); }
-                catch (SocketException ex) { Throw(ex); }
-            });
-            clientThread.Start();
+        static void Main()
+        {
+            client.Start();
+            client.ReceivedMessage += OnMessageReceived;
 
             StringBuilder sb = new StringBuilder();
-
-            while (clientThread.IsAlive)
+            while (true)
             {
-                var key = Console.ReadKey(true);               
+                var key = Console.ReadKey(true);
                 if (key.Key == ConsoleKey.Escape)
                     break;
 
                 if(key.Key == ConsoleKey.Backspace)
                 {
-                    if (sb.Length < 1) continue;
-                    sb.Remove(sb.Length - 1, 1);
+                    if (sb.Length < 1)
+                        continue;
                     Console.Write("\b \b");
+                    sb.Remove(sb.Length - 1, 1);
                     continue;
                 }
 
-                sb.Append(key.KeyChar);
                 Console.Write(key.KeyChar);
+                sb.Append(key.KeyChar);
 
                 if (key.Key != ConsoleKey.Enter)
                     continue;
-
-                await client.SendAsync(sb.ToString());
-                Console.Write('\n');
+                client.Send(sb.ToString());
                 sb.Clear();
             }
-            await client.StopAsync();
         }
     }
 }

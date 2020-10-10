@@ -7,6 +7,8 @@ using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
 
+using Common;
+
 namespace ConsoleChatClient
 {
     public class AsyncChatClient
@@ -27,66 +29,45 @@ namespace ConsoleChatClient
 
         readonly Socket client = new Socket(AddressFamily.InterNetwork, SocketType.Stream, ProtocolType.Tcp);
 
-        public bool Running { get; private set; } = false;
+        readonly byte[] receiveBuffer = new byte[1024];
 
-        Task RecieveAsync()
+        public event Action<string>? ReceivedMessage;
+
+        void Connect(IAsyncResult result)
         {
-            while (Running)
-            {
-                if (client.Available < 1)
-                    continue;
-                byte[] buf = new byte[client.Available];
-                client.Receive(buf);
+            client.EndConnect(result);
+            Console.WriteLine("Successfully connected to server.");
+            client.BeginReceive(receiveBuffer, 0, receiveBuffer.Length, 0, Receive, null);
+        }
 
-                var str = ASCII.GetString(buf);
-                Console.WriteLine(str);
+        void Receive(IAsyncResult result)
+        {
+            try
+            {
+                var count = client.EndReceive(result);
+                client.BeginReceive(receiveBuffer, 0, receiveBuffer.Length, 0, Receive, null);
+
+                var str = ASCII.GetString(receiveBuffer, 0, count);
+                ReceivedMessage?.Invoke(str);
             }
-            return Task.CompletedTask;
-        }
-
-        public Task StartAsync()
-        {
-            CancellationTokenSource cancel = new CancellationTokenSource(6000);
-            var token = cancel.Token;
-            token.Register(() => Console.WriteLine($"Could not establish connection to server at {serverIp}:{serverPort}..."));
-
-            Console.WriteLine($"Attempting connection at {serverIp}:{serverPort}");
-
-            bool refused = false;
-            SocketException? exception = null;
-            Task.Run(() =>
+            catch (SocketException ex)
             {
-                try { client.Connect(serverIp, serverPort); }
-                catch (SocketException ex) { refused = true; exception = ex; return; }
-            }, token).Wait();
-            cancel.Dispose();
-            
-            if (refused)
-            {
-                Console.WriteLine("Server refused connection.");
-                throw exception ?? new SocketException();
+                if (ex.SocketErrorCode == SocketError.ConnectionReset)
+                    Console.WriteLine("Connection was lost to the server.");
             }
-
-            Console.WriteLine($"Successfully connected to {serverIp}:{serverPort}");
-            Running = true;
-            return RecieveAsync();
         }
 
-        public Task StopAsync()
+        public void Send(string message)
         {
-            Running = false;
-            client.Close();
-            return Task.CompletedTask;
+            var buf = ASCII.GetBytes(message);
+            client.BeginSend(buf, 0, buf.Length, 0, x => client.EndSend(x), null);
         }
 
-        public Task SendAsync(string msg)
+        public void Start()
         {
-            if (!client.Connected)
-                throw new Exception("Client is not connected.");
-
-            var strBytes = ASCII.GetBytes(msg);
-            client.Send(strBytes);
-            return Task.CompletedTask;
+            var end = new IPEndPoint(serverIp, serverPort);
+            Console.WriteLine($"Attempting connection at {end}");
+            client.BeginConnect(end, Connect, null);
         }
     }
 }
